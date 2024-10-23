@@ -1,4 +1,4 @@
-# Skin_Lesion_image_analysis
+# ISIC 2019 challenge: Skin Lesion image analysis
 Analyzed 25,331 skin lesion images (taken from [Kaggle](https://www.kaggle.com/datasets/salviohexia/isic-2019-skin-lesion-images-for-classification)) which was the ISIC challenge in 2019 as part of a group course project in Fall 2022. 
 
 * Implemented CNN (in R) with 80% test set accuracy to classify all the 25,331 Skin Lesion Images.
