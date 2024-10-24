@@ -1,0 +1,993 @@
+---
+title: "Project 2"
+author: ''
+date: "11/2/2022"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Load the required libraries
+library(EBImage)
+library(readxl)
+library(tidyverse)
+library(caret)
+library(nnet)
+library (randomForest)
+library(e1071)
+```
+
+```{r}
+
+# set working directory: Set this as the directory where you have your .rmd file and the "Data" folder
+Wd_path="C:/Users/tpr16/OneDrive/Desktop/3rd sem/557 Data Mining I/project 2"
+setwd(Wd_path)
+
+# Read the excel file as data frame. Make sure to save the file as .xlsx instead of the default .csv extension
+# class labels for all images
+df = read_excel("./Data/ISIC_2019_Training_GroundTruth.xlsx",col_names=TRUE)
+dim(df)
+head(df)
+
+```
+
+```{r}
+
+# The types of skin Lesion (8 types), Unknown is not considered as none of the labels corresponds to unknown   
+Types = colnames(df)[2:9]    
+
+
+w = 36    # Width of the image
+h = 48   # Height of the image
+N_features = w*h*3 # number of features
+
+
+
+# matrix to store features, one image per row
+features <- data.frame(matrix(0, nrow = dim(df)[1], ncol= (N_features+1) ))
+row.names(features) <- df$image
+
+# last column is the class label
+colnames(features)[N_features+1] <- "type" 
+
+
+
+f = matrix(0, nrow = 1, ncol=N_features)   # Empty row vector to store the unrolled pixel intensity data 
+dim(f)
+
+
+
+# Read the images based on type of Lesion, resize and assign to the corresponding column in the data frame
+for (i in 1:length(Types)) {
+  
+   t=Types[i]     # Type of the Leasion
+   lst=df$image[df[t]==1]    # Indexes of all images belonging to that leasion type
+      
+   # Read all images of a particular type
+   for (j in 1:length(lst)){
+        Name_I=lst[j]  # Name of the image
+        pth=paste("Data/",t,"/",Name_I,".jpg",sep="")    #Path where image belong based on the name and type
+        I = readImage(pth)     # Reading the image
+        I_resized = resize(I,w,h)    # Resize into w*h
+        f=t(as.vector(I_resized))       # Unroll the image. This unrolls column wise, picks 2nd column of red, places it below 1st, repets for R,G, and B
+        features[Name_I,1:N_features]=f[1,1:N_features]
+        features[Name_I,"type"]=t
+   }
+   
+ }
+save(features,file =paste(Wd_path,"/features.Rdata",sep=""))
+```
+
+In each row, we have 5185 features corresponding to one image.
+* cells 1 to 36*48 (= 1728) for corresponding to red
+* cells 1729 to 3456 corresponding to blue
+* cells 3457 to 5184 corresponding to green
+
+Last column of matrix corresponds to Lesion type
+```{r}
+load(file =paste(Wd_path,"/features.Rdata",sep=""))
+dim(features)
+features[1,1:100]
+
+features$type = as.factor(features$type)
+round(table(features$type)/sum(table(features$type)), 4)
+
+
+```
+
+# Divide into Testing and training sets
+```{r}
+
+test_size = round(0.75*dim(features)[1],0)
+set.seed(1)
+sample_points <- sample(1:nrow(features), test_size)
+
+training.samples = features[sample_points,]
+dim(training.samples)
+# proportion of each type of images
+sort(round(table(training.samples$type)/sum(table(training.samples$type)), 4))
+
+
+testing.samples = features[-sample_points,]
+dim(testing.samples)
+```
+
+# EDA
+
+Average pixel intensities by "type"
+What other EDA?
+```{r}
+
+Avg_intensities = aggregate(training.samples[,1:(dim(training.samples)[2]-1)], list(training.samples$type), mean)
+dim(Avg_intensities)
+
+RBG = factor(c(rep(1,w*h), rep(3,w*h), rep(2,w*h)))
+length(RBG)
+Avg_int_transpose = t(Avg_intensities[,2:5185])
+colnames(Avg_int_transpose) = as.character(Avg_intensities[,1])
+data.frame(Avg_int_transpose)
+
+# i for red, 3 for blue; 2 for green
+Avg_int_transpose = data.frame(cbind(Avg_int_transpose,RBG))
+dim(Avg_int_transpose)
+
+
+library(data.table)
+# convert data to long form
+Avg_int_transpose2 = melt(Avg_int_transpose, id.vars = c("RBG"), measure.vars = c("AK", "BCC", "BKL", "DF", "MEL", "NV", "SCC", "VASC"))
+dim(Avg_int_transpose2)
+head(Avg_int_transpose2)
+colnames(Avg_int_transpose2)[2] = "type"
+
+
+library(ggplot2)
+library(dplyr)
+
+ Avg_int_transpose2$RBG = as.factor(Avg_int_transpose2$RBG)
+ Avg_int_transpose2 %>%
+    ggplot(aes(value, fill = RBG)) + geom_histogram() + facet_wrap(~type) +
+   xlab("Pixel Intensity") + ylab("Frequency")
+
+
+    
+```
+
+
+
+
+
+# Dimension reduction using PCA
+Summary - Based on both Kaiser's rule and examination of scree plot, we believe that retaining 15 PCs is good enough.
+```{r}
+
+# no scaling needed since all intensities lie between 0 and 1
+pr.out <- prcomp(training.samples[,-ncol(training.samples)])
+save(pr.out,file =paste(Wd_path,"/pca.Rdata",sep=""))
+load(file =paste(Wd_path,"/pca.Rdata",sep=""))
+
+#prop of variance explained by each PC
+pr.var <- pr.out$sdev^2
+prop_var <- pr.var / sum(pr.var)
+prop_var[1:15]
+
+
+cumsum(prop_var)[96]
+
+# plot of cum. prop. of variance explained
+plot(cumsum(prop_var), xlab = "Principal Component",
+    ylab = "Cumulative Proportion of Variance Explained",
+    ylim = c(0, 1), type = "p")
+abline(h=0.96, v = 90,  col = "red")
+
+
+# close up: First 10 PCs explain more than 80% variance in data
+plot(cumsum(prop_var)[1:10], xlab = "Principal Component",
+    ylab = "Cumulative Proportion of Variance Explained", xlim = c(0,10),
+    ylim = c(0, 1), type = "p")
+abline(h = 0.8, col = "red")
+
+
+# 15 PCs explain 90% variation
+plot(cumsum(prop_var)[1:50], xlab = "Number of principal Components",
+    ylab = "Cumulative Proportion of Variance Explained", xlim = c(1,50),
+    ylim = c(0, 1), type = "p")
+abline(h = 0.9, v = 15, col = "red")
+
+
+# 90 PCs explain 96% variation
+plot(c(80:150),cumsum(prop_var)[80:150], xlab = "Number of principal Components",
+    ylab = "Cumulative Proportion of Variance Explained", type = "p")
+abline(h=0.96, v = 90,  col = "red")
+
+
+
+
+# Kaiser's rule
+pr.var[pr.var>=1]
+length(pr.var[pr.var>=1])
+```
+
+
+# Rotated co-ordinates (restricted to 15 PCs)
+```{r}
+
+# reference: https://hastie.su.domains/ISLR2/Labs/Rmarkdown_Notebooks/Ch12-unsup-lab.html
+
+
+dim(pr.out$rotation)
+
+fifteen_PCs = as.matrix(pr.out$rotation[,1:15])
+sum(fifteen_PCs[,1]^2) # adds to 1 as expected
+
+# reduced dimension after projecting data onto first 15 PCs
+train_red_features = as.matrix(training.samples[,-ncol(training.samples)]) %*% fifteen_PCs
+dim(train_red_features)
+
+train_red_features = data.frame(train_red_features)
+head(train_red_features)
+
+save(train_red_features,file =paste(Wd_path,"/reduced_features.Rdata",sep=""))
+load(file =paste(Wd_path,"/reduced_features.Rdata",sep=""))
+```
+
+
+# Interpreting PCs
+
+
+score plots - no visible clustering observed in the
+```{r}
+# reference:  https://www.geo.fu-berlin.de/en/v/soga/Geodata-analysis/Principal-Component-Analysis/principal-components-basics/Derive-synthetic-variables/index.html
+
+Z = train_red_features[,1:4]
+names(Z)
+head(Z)
+
+Z1 = cbind(Z,training.samples[,ncol(training.samples)]) 
+dim(Z1)
+colnames(Z1)[dim(Z1)[2]] = "type"
+Z1$type = factor(Z1$type)
+head(Z1)
+
+# no visible clustering
+Z1 %>%
+    ggplot(aes(PC1, PC2, col = type)) + geom_point()  # + facet_wrap(~type)
+
+
+#### extra ############################ 
+
+Z1 %>%
+    ggplot(aes(PC1, PC2)) + geom_point() 
+
+
+plot(Z[,1:2], xlab = 'Data projected along PC1', ylab = 'Data projected along PC2')
+abline(h = mean(Z[,1]), col = "blue")
+abline(v = mean(Z[,2]), col = "green")
+
+```
+
+Loading plot
+```{r}
+
+
+```
+
+Other PCA interpretatons, if possible
+```{}
+
+```
+
+
+Dimension reduction on test data
+```{r}
+pr.out.test = prcomp(testing.samples[,-ncol(testing.samples)])
+save(pr.out.test,file = paste(Wd_path,"/test_reduced.Rdata", sep="" ))
+load(file = paste(Wd_path,"/test_reduced.Rdata", sep="" ))
+
+
+Z2 = pr.out.test$rotation # matrix of PCs
+fifteen_PCs_test = as.matrix(Z2[,1:15])
+dim(Z2)
+sum(fifteen_PCs_test[,1]^2) # sum is one as expected
+
+
+test_red_features = as.matrix(testing.samples[,-ncol(testing.samples)]) %*% fifteen_PCs_test
+dim(test_red_features)
+
+
+class(testing.samples[,ncol(testing.samples)])
+test_labels = testing.samples[,ncol(testing.samples)] 
+test_labels = factor(test_labels)
+head(test_labels)
+```
+
+# Tree based methods
+
+
+Single tree:
+Classifies into three most prevalent categories. Problems:
+1) imbalanced data
+2) too many categories and we are using information gain
+```{r}
+
+# reference: https://rstudio-pubs-static.s3.amazonaws.com/222569_a8d12e00f8204a479e84a33b49e54790.html
+# https://stat.ethz.ch/R-manual/R-devel/library/rpart/html/rpart.control.html
+
+
+
+library(rpart)
+library(rpart.plot)
+
+head(train_red_features)
+type = factor(training.samples[,ncol(training.samples)])
+train_red_features = cbind(train_red_features, type)
+head(train_red_features)
+
+# inbuilt rpart stopping rules are only able to classifiy into three classes
+# inbuilt rpart stopping criteria  : rpart.control(minsplit = 20, minbucket = round(minsplit/3), cp = 0.01, 
+      #                              maxcompete = 4, maxsurrogate = 5, usesurrogate = 2, xval = 10,
+      #                              surrogatestyle = 0, maxdepth = 30, ...)
+
+head(train_red_features)
+
+tree.lesion.std = rpart(train_red_features$type ~ ., train_red_features[,-ncol(train_red_features)], method = "class", parms = list(split = 'information'))
+rpart.plot(tree.lesion.std)
+printcp(tree.lesion.std)
+
+# we observe that the three most prevalent classes BCC, MEL and NV only are the classification categories in the tree
+sort(round(table(training.samples$type)/sum(table(training.samples$type)), 4))
+
+
+level = levels(training.samples$type)
+
+tree.test = predict(tree.lesion.std, data.frame(test_red_features))
+
+tree.pred = matrix(0, nrow = dim(tree.test)[1], ncol = 1)
+
+for (j in 1:dim(tree.test)[1]) {
+ 
+  index = which.max(tree.test[j,])
+   tree.pred[j,1] = level[index]
+}
+
+tree.pred= factor(tree.pred)
+
+# 51.5%
+conf.matrix.tree = table(tree.pred, test_labels)
+conf.matrix.tree
+(239+3025)/dim(tree.test)[1]
+
+
+####################################################################################################
+
+# cp is the complexity parameter C_alpha(T) = C(T) + alpha* |T|
+# Small α results in larger trees and potential overfitting
+another_tree = rpart(training.samples$type ~ ., train_red_features,control = rpart.control(cp = 0.002), method = "class", parms = list(split = 'information'))
+bestcp <- tree.lesion.std$cptable[which.min(tree.lesion.std$cptable[,"xerror"]),"CP"]
+
+tree.pruned <- prune(tree.lesion.std, cp = bestcp)
+rpart.plot(tree.pruned)
+
+
+test_red_features
+tree.lesion = rpart(training.samples$type ~ ., train_red_features, method = "class", control = rpart.control(minsplit = 10, cp = 0.002))
+rpart.plot(tree.lesion)
+tree.lesion
+
+
+
+
+```
+
+
+Tree using information gain - C5.0
+The model fit is called C5.0 (which is an upgrade of C4.5)
+This model solves the problem of too many categories to some extent - has 6 categories, misses two less prevelant
+Data still imbalanced - so low accuracy
+```{r}
+library(C50)
+library(printr)
+
+# https://rpubs.com/kjmazidi/195428
+
+
+# someimproved - classified into 6 classes
+# categories not present in tree - DF, SCC (least, third from last in amount of samples)
+C5.0_tree_train = C5.0(train_red_features$type~., data = train_red_features ) 
+summary(C5.0_tree_train)
+plot(C5.0_tree_train)
+text()
+
+
+
+
+### Applying on test set
+class(test_red_features)
+test_red_features = data.frame(test_red_features)
+head(test_red_features)
+
+test_pred_C5.0 <- predict(object=C5.0_tree_train, newdata=test_red_features, type="class")
+# plot(C5.0_tree_train) # runs for too long
+
+
+conf.matrix = table(test_pred_C5.0, test_labels)
+conf.matrix[1,1]
+
+sum = 0
+for (t in 1:8) {
+  
+  sum = sum + conf.matrix[t,t]
+}
+
+sum
+
+
+# we observe only 43% classification accuracy (Since data imbalance not addressed yet)
+sum/dim(test_red_features)[1]
+
+
+
+```
+
+# Bagging
+Since PCs are uncorrelated, the trees fit for different bootstrap samples do not exhibit excessive variation. But weak learners are not independent as we have "strong predictors"
+
+We observe 63\% classification accuracy. The most well classified is the class NV (which is most in proportion). Classification error is closest to 1 in case of classes that are less in proportion. Under representation of less prop classes in bootstrap samples.
+
+Most classified as the two major categories - problem: imbalanced data
+```{r}
+set.seed(1)
+bag.train.tree = randomForest(train_red_features$type~., data = train_red_features, mtry = 15, importance = T)
+bag.train.tree
+
+bag.conf = bag.train.tree$confusion
+sort(bag.conf[,9]) # classification error for each class
+
+
+
+# Applying on test set
+
+bag.test = predict(bag.train.tree, test_red_features)
+
+conf.matrix.bag = table(bag.test, test_labels)
+conf.matrix.bag
+
+sum.bag = 0
+for (t in 1:8) {
+  
+  sum.bag = sum.bag + conf.matrix.bag[t,t]
+}
+
+# 36% accuracy
+sum.bag/dim(test_red_features)[1]
+```
+
+
+# Random forest classifier
+Clearly, PC1 is a more important variable. Therefore bagging would not involve independent trees. RF classifier will help de-correlate the tree topologies.
+
+Most classified into two major categories: problem = imbalanced data
+```{r} 
+rf.train = randomForest(train_red_features$type~., data = train_red_features, importance = TRUE)
+rf.train
+
+# applying on test data
+rf.test = predict(rf.train, test_red_features)
+
+conf.matrix.rf = table(rf.test, test_labels)
+conf.matrix.rf
+
+sum.rf = 0
+for (t in 1:8) {
+  
+  sum.rf = sum.rf + conf.matrix.rf[t,t]
+}
+
+# 39% accuracy
+sum.rf/dim(test_red_features)[1]
+```
+
+# Boosting
+
+Is there a multi class huber loss?
+```{r}
+library(caret)
+library(gbm)
+
+# ref: https://rpubs.com/nkrohrmann/predictionclasse
+
+
+class(train_red_features$type)
+boost.train = gbm(train_red_features$type~., data = train_red_features, distribution = "multinomial", n.trees = 500)
+summary(boost.train)
+
+boost.train.5 = gbm(train_red_features$type~., data = train_red_features, distribution = "multinomial", n.trees = 5)
+
+# apply on test data
+
+
+test_red_features = data.frame(test_red_features)
+#  the prediction it produced was a data frame that contained the likelihood of each level of the factor variable classe for every entry.
+boost.test = predict(boost.train, test_red_features)
+boost.test.5 = predict(boost.train.5, test_red_features)
+
+
+# I used the for loop below to determine the most likely classe respectively and store it in a new data frame
+boost.test <- as.data.frame(boost.test)
+boost.test.5 <- as.data.frame(boost.test.5)
+dim(boost.test)
+
+
+level = levels(training.samples$type)
+
+boost.pred.5 = matrix(0, nrow = dim(boost.test.5)[1], ncol = 1)
+dim(boost.test.5)[1] # somehow 3D array with third co-ord = 1
+
+
+for (j in 1:dim(boost.test.5)[1]) {
+ 
+  index = which.max(boost.test.5[j,,1])
+   boost.pred.5[j,1] = level[index]
+}
+
+boost.pred= factor(boost.pred.5)
+
+conf.matrix.boost = table(boost.pred, test_labels)
+conf.matrix.boost
+
+
+# 48% for 5 trees boosting
+(2652+427)/dim(boost.test.5)[1]
+
+# 29% for 200 trees
+ (1034+784)/dim(boost.test)[1]
+
+
+# 26% accuracy for 100 trees
+(1071+563)/dim(boost.test)[1]
+
+# 23% for 500 trees
+ (1082+ 401)/dim(boost.test)[1]
+```
+Possible improvement: starting weight is a prior density that incorporates imbalance in data
+
+
+# SVM
+How to pick kernel?
+```{r}
+
+svm.train = svm(train_red_features$type ~ ., data = train_red_features, kernel = "linear", gamma = 0.1, cost = 10)
+
+svm.test = predict(svm.train, test_red_features)
+
+conf.matrix.svm.linear = table(svm.test, test_labels)
+
+(69+3162)/dim(test_red_features)[1]
+
+
+
+svm.train = svm(train_red_features$type ~ ., data = train_red_features, kernel = "radial", gamma = 5, cost = 10)
+
+svm.test = predict(svm.train, test_red_features)
+
+conf.matrix.svm.radial = table(svm.test, test_labels)
+
+(69+3162)/dim(test_red_features)[1]
+
+
+
+
+summary(svm.train)
+svm.train$decision.values
+svm.test = as.factor(svm.test)
+
+
+set.seed(1)
+tune.out <- tune(svm, train_red_features$type ~ ., data = train_red_features, 
+    kernel = "linear", 
+    ranges = list(
+      cost = c(0.1, 1, 10, 20, 100),
+      gamma = c(0.5, 1, 2, 3, 4)
+    )
+  )
+summary(tune.out)
+
+```
+
+# Dealing with imbalenced data: Downsampling with SMOTE
+```{r}
+# reference: https://topepo.github.io/caret/subsampling-for-class-imbalances.html
+# https://www.rdocumentation.org/packages/caret/versions/6.0-92/topics/trainControl
+
+library(smotefamily)
+
+smote_train = SMOTE(train_red_features[,-ncol(train_red_features)], train_red_features$type)
+dim(smote_train$data)
+smote_syn_data = smote_train$data
+
+
+names(smote_syn_data)[ncol(smote_syn_data)] = "type"
+smote_syn_data$type = factor(smote_syn_data$type)
+
+save(smote_syn_data,file = paste(Wd_path,"/smote_train.Rdata", sep="" ))
+load(file = paste(Wd_path,"/smote_train.Rdata", sep="" ))
+
+smote_prop_train = round(prop.table(table(smote_syn_data$type)),4)
+
+orig_prop_train = round(table(training.samples$type)/sum(table(training.samples$type)), 4)
+
+orig_prop_train; smote_prop_train 
+
+```
+
+# Applying classification algorithms on synthetic data
+boosted C5.0 - if too many bagging iterations then performance gets worse due to too many outliers.
+bagged SVM - couldn't do
+svm on smote data
+bagged C5.0
+RF on C.5 
+logistic
+```{r}
+library(caret)
+library(C50)
+library(kernlab)
+
+
+# smote_C5.0 = train(smote_syn_data$type~., data = smote_syn_data, method = "C5.0")
+# smote_rf_train = train(smote_syn_data$type~., data = smote_syn_data, method = "rf", trControl = ctrl)
+
+bagctrl = bagControl(fit = svmBag$fit, predict = svmBag$pred, aggregate = svmBag$aggregate)
+ctrl = trainControl(method = "cv", number = 5)
+
+
+# Random Forest
+smote_rf_train = randomForest(smote_syn_data$type~., data = smote_syn_data, ntree = 100)
+save(smote_rf_train,file =paste(Wd_path,"/smote_rf_100trees.Rdata",sep=""))
+load(file = paste(Wd_path,"/smote_rf_100trees.Rdata", sep="" ))
+
+
+# C5.0
+smote_C5.0_1 =  C5.0(smote_syn_data[,-ncol(smote_syn_data)], smote_syn_data$type, trials = 1)
+
+# Boosted C50
+smote_C5.0 =  C5.0(smote_syn_data[,-ncol(smote_syn_data)], smote_syn_data$type, trials = 5)
+save(smote_C5.0,file =paste(Wd_path,"/smote_C5.0_5trials.Rdata",sep=""))
+load(file = paste(Wd_path,"/smote_C5.0_5trials.Rdata", sep="" ))
+
+
+smote_C5.0_10 =  C5.0(smote_syn_data[,-ncol(smote_syn_data)], smote_syn_data$type, trials = 10)
+
+smote_C5.0_50 =  C5.0(smote_syn_data[,-ncol(smote_syn_data)], smote_syn_data$type, trials = 50)
+
+
+# Bagged SVM - keep getting error
+svmbag <- train(smote_syn_data$type~., data = smote_syn_data, "bag", bagControl = bagctrl)
+
+
+# methods
+smote_rf_train
+smote_C5.0$boostResults
+smote_C5.0_50$boostResults
+
+smote_rf_train
+smote_rf_train$forest
+
+
+# svm on smote data - what else is the problem?
+
+svm.train.smote = svm(smote_syn_data$type ~ ., data = smote_syn_data, kernel = "linear", gamma = 0.1, cost = 10)
+save(svm.train.smote,file =paste(Wd_path,"/smote_svm.Rdata",sep=""))
+load(file = paste(Wd_path,"/smote_svm.Rdata", sep="" ))
+
+
+svm.test.smote = predict(svm.train.smote, test_red_features)
+
+conf.matrix.svm.smote = table(svm.test.smote, test_labels)
+
+(69+3162)/dim(smote_syn_data)[1]
+
+
+
+svm.train = svm(train_red_features$type ~ ., data = train_red_features, kernel = "radial", gamma = 5, cost = 10)
+
+svm.test = predict(svm.train, test_red_features)
+
+conf.matrix.svm = table(svm.test, test_labels)
+
+(69+3162)/dim(test_red_features)[1]
+
+
+
+# predictions
+smote_C5.0_1_pred = predict(smote_C5.0_1, test_red_features)
+sum(diag(table(smote_C5.0_1_pred, test_labels)))/length(test_labels)
+
+smote_C5.0_pred = predict(smote_C5.0, test_red_features)
+table(smote_C5.0_pred, test_labels)
+sum(diag(table(smote_C5.0_pred, test_labels)))/length(test_labels) # 39% accuracy for just 5 trees
+
+
+smote_C5.0_10_pred = predict(smote_C5.0_10, test_red_features)
+table(smote_C5.0_10_pred, test_labels)
+sum(diag(table(smote_C5.0_10_pred, test_labels)))/length(test_labels)
+
+
+
+# same issue of MEL, NV
+smote_C5.0_50_pred = predict(smote_C5.0_50, test_red_features)
+table(smote_C5.0_50_pred, test_labels)
+sum(diag(table(smote_C5.0_pred, test_labels)))/length(test_labels)
+
+
+smote_rf_ptrd = predict(smote_rf_train, test_red_features)
+table(smote_rf_ptrd, test_labels)
+```
+
+
+
+# bagging C5.0 on smote
+```{r}
+
+library(baguette)
+C5.0_bag_smote = bagger(smote_syn_data[,-ncol(smote_syn_data)], smote_syn_data$type, base_model = "C5.0", times = 100 )
+
+class(test_labels)
+length(test_labels)
+
+
+
+C5.0_bag_smote_pred = predict(C5.0_bag_smote, test_red_features)
+class(C5.0_bag_smote_pred)
+colnames(C5.0_bag_smote_pred) = "type"
+dim(C5.0_bag_smote_pred)
+
+is.na(as.numeric(C5.0_bag_smote_pred[1,1]) == as.numeric(test_labels[1]) )
+
+tot = 0
+
+for (j in 1:dim(C5.0_bag_smote_pred)[1]) {
+
+  if (as.numeric(C5.0_bag_smote_pred[j,1])==as.numeric(test_labels[j])){
+    tot = tot + 1
+  }
+    
+}
+
+tot # 2726
+tot/dim(test_red_features)[1]
+
+
+```
+
+
+
+
+
+
+
+
+# Dimension reduction using neural networks
+```{r}
+view(USArrests)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+
+df_subset=df[1:6500,]
+set.seed(1)
+training.samples <- df_subset$type %>% createDataPartition(p = 0.75, list = FALSE)
+train.data  <- df_subset[training.samples, ]
+test.data <- df_subset[-training.samples, ]
+```
+
+```{r}
+# Logistic Regression
+start_time <- Sys.time()
+logistic <- nnet::multinom(type ~., data = train.data)
+# Summarize the model
+summary(logistic)
+# Make predictions
+predicted.classes <- logistic %>% predict(test.data)
+end_time <- Sys.time()
+logistic_time=end_time - start_time
+head(predicted.classes)
+# Model accuracy
+mean(predicted.classes == test.data$type)
+```
+
+```{r}
+# RandomForest
+start_time <- Sys.time()
+RF=randomForest(type~., data = train.data )
+# Summarize the model
+summary(RF)
+# Make predictions
+predicted.classes <- RF %>% predict(test.data)
+end_time <- Sys.time()
+logistic_time=end_time - start_time
+head(predicted.classes)
+# Model accuracy
+mean(predicted.classes == test.data$type)
+```
+
+```{r}
+#Support Vector Machine
+start_time <- Sys.time()
+svm = svm(type~. , data = train.data, kernel = "radial", cost = 10, scale = FALSE)
+# Summarize the model
+summary(svm)
+# Make predictions
+predicted.classes <- svm %>% predict(test.data)
+end_time <- Sys.time()
+logistic_time=end_time - start_time
+head(predicted.classes)
+# Model accuracy
+mean(predicted.classes == test.data$type)
+```
+
+```{r}
+
+
+
+
+for (i in dim(boost.test)[1]){
+  
+  max <- max(boost.test[i,])
+  
+  if(boost.test[i,1] == max){
+    
+    de <- "AK"
+    df <- rbind(df, de)
+    }
+  else if(boost.test[i,2] == max){
+    
+    de <- "BCC"
+    df <- rbind(df, de)
+    }
+  else if (boost.test[i,3] == max){
+    
+    de <- "BKL"
+    df <- rbind(df, de)
+    }
+  else if (boost.test[i,4] == max){
+    
+    de <- "DF"
+    df <- rbind(df, de)
+  }
+  else if (boost.test[i,5] == max){
+    
+    de <- "MEL"
+    df <- rbind(df, de)
+  }
+  else if (boost.test[i,6] == max){
+    
+    de <- "NV"
+    df <- rbind(df, de)
+  }
+    else if (boost.test[i,7] == max){
+    
+    de <- "SCC"
+    df <- rbind(df, de)
+  }
+  else {
+    de <- "VASC"
+    df <- rbind(df, de)
+  }
+  
+  
+}
+
+```
+
+```{r}
+library(caret)
+# https://topepo.github.io/caret/subsampling-for-class-imbalances.html
+set.seed(3)
+
+down_train = downSample(train_red_features, train_red_features$type)
+
+down_train
+table(train_red_features$type)
+table(down_train$type)
+
+# too few in each sample
+
+
+
+library(smotefamily)
+set.seed(4)
+smote_train = SMOTE( train_red_features[,-dim(train_red_features)[2]], train_red_features$type )
+class(smote_train)
+
+
+# A resulting dataset consists of original minority instances, synthetic minority instances and original majority instances 
+down_train1 = smote_train$data
+dim(down_train1[,-16])
+dim(train_red_features[,-16])
+dim(down_train[,-c(16,17)]) # one extra type column attached
+# again imbalanced
+
+
+
+round(table(training.samples$type)/sum(table(training.samples$type)), 4)
+round(prop.table(table(down_train1$class)),4)
+prop.table(table(down_train$type))
+
+
+table(training.samples$type)
+table(down_train1$class)
+table(down_train$type)
+
+
+library(ROSE)
+set.seed(9560)
+rose_train <- ROSE(train_red_features$type ~ ., data = train_red_features)$data       
+
+
+
+```
+
+
+
+# Applying classification algorithms on down_train1
+```{r}
+names(down_train1)[16] = "type"
+down_train1$type = factor(down_train1$type)
+C5.0_down_train1 = C5.0(down_train1$type~., data = down_train1 ) 
+
+
+
+
+test_pred_down_C5.0 <- predict(object=C5.0_down_train1, newdata=test_red_features, type="class")
+# plot(C5.0_tree_train) # runs for too long
+
+
+conf.matrix.down1 = table(test_pred_down_C5.0, test_labels)
+conf.matrix[1,1]
+
+sum1 = 0
+for (t in 1:8) {
+  
+  sum1 = sum1 + conf.matrix.down1[t,t]
+}
+
+
+```
+
+
+
+```{r}
+
+
+```
