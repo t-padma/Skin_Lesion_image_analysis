@@ -1,0 +1,355 @@
+---
+title: "CNN implementation"
+author: "Aditya"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# set working directory: Set this as the directory where you have your .rmd file and the "Data" folder
+Wd_path="D:/Aditya/R"
+setwd(Wd_path)
+```
+
+
+```{r}
+# Load the required libraries
+library(EBImage)
+library(readxl)
+library(tidyverse)
+library(caret)
+options(scipen = 999)
+library(magrittr) # needs to be run every time you start R and want to use %>%
+library(dplyr) # alternatively, this also loads %>%
+library(imager)
+library(keras)
+```
+
+```{r}
+# Use python in your anaconda3 environment folder
+reticulate::use_python("C:/Users/admin/anaconda3/envs/tf_image", required = T)
+```
+
+```{r}
+folder_list <- list.files("Data_1/train/")
+folder_path <- paste0("Data_1/train/", folder_list, "/")
+folder_path
+# Get file name
+file_name <- map(folder_path, function(x) paste0(x, list.files(x))) %>% unlist()
+# first 6 file name
+head(file_name)
+
+# last 6 file name
+tail(file_name)
+length(file_name)
+```
+
+
+```{r}
+sample_image <- sample(file_name, 6)
+# Load image into R
+img <- map(sample_image, load.image)
+# Plot image
+par(mfrow = c(2, 3)) # Create 2 x 3 image grid
+map(img, plot)
+```
+
+```{r}
+# Full Image Description
+img <- load.image(file_name[1])
+img
+# Image Dimension
+dim(img)
+# Function for acquiring width and height of an image
+get_dim <- function(x){
+img <- load.image(x)
+df_img <- data.frame(height = height(img),
+width = width(img),
+filename = x
+)
+return(df_img)
+}
+get_dim(file_name[1])
+```
+
+
+```{r}
+set.seed(1)
+sample_file <- sample(file_name, 800)
+# Run the get_dim() function for each image
+file_dim <- map_df(sample_file, get_dim)
+head(file_dim, 10)
+summary(file_dim)
+```
+
+```{r}
+# Desired height and width of images
+target_size <- c(64, 64)
+# Batch size for training the model
+batch_size <- 32
+
+#library(keras)
+#install_tensorflow()
+# Image Generator
+train_data_gen <- image_data_generator(validation_split = 0.25)
+# Training Dataset
+train_image_array_gen <- flow_images_from_directory(directory = "Data_1/train/", # Folder of the data
+target_size = target_size, # target of the image dimension (64 x 64
+color_mode = "rgb", # use RGB color
+batch_size = batch_size,
+seed = 1, # set random seed
+subset = "training", # declare that this is for training data
+generator = train_data_gen
+)
+
+# Validation Dataset
+val_image_array_gen <- flow_images_from_directory(directory = "Data_1/train/",
+target_size = target_size,
+color_mode = "rgb",
+batch_size = batch_size ,
+seed = 1,
+subset = "validation", # declare that this is the validation data
+generator = train_data_gen
+)
+```
+
+
+```{r}
+# Number of training samples
+train_samples <- train_image_array_gen$n
+# Number of validation samples
+valid_samples <- val_image_array_gen$n
+# Number of target classes/categories
+output_n <- n_distinct(train_image_array_gen$classes)
+# Get the class proportion
+table("\nFrequency" = factor(train_image_array_gen$classes)
+) %>%
+prop.table()
+```
+
+
+```{r}
+# Set Initial Random Weight
+tensorflow::tf$random$set_seed(1)
+model <- keras_model_sequential(name = "simple_model") %>%
+
+# Convolution Layer
+layer_conv_2d(filters = 16,
+kernel_size = c(3,3),
+padding = "same",
+activation = "relu",
+input_shape = c(target_size, 3)
+) %>%
+# Max Pooling Layer
+layer_max_pooling_2d(pool_size = c(2,2)) %>%
+# Flattening Layer
+layer_flatten() %>%
+# Dense Layer
+layer_dense(units = 16,
+activation = "relu") %>%
+# Output Layer
+layer_dense(units = output_n,
+activation = "softmax",
+name = "Output")
+model
+```
+
+
+```{r}
+model %>%
+compile(
+loss = "categorical_crossentropy",
+optimizer = optimizer_adam(lr = 0.01),
+metrics = "accuracy"
+)
+
+# Fit data into model
+history <- model %>%
+fit(
+# training data
+train_image_array_gen,
+# training epochs
+steps_per_epoch = as.integer(train_samples / batch_size),
+epochs = 30,
+# validation data
+validation_data = val_image_array_gen,
+validation_steps = as.integer(valid_samples / batch_size)
+)
+
+plot(history)
+```
+
+
+```{r}
+val_data <- data.frame(file_name = paste0("Data_1/train/", val_image_array_gen$filenames)) %>% mutate(class = str_extract(file_name, "AK|BCC|BKL|DF|MEL|NV|SCC|VASC"))
+head(val_data, 10)
+```
+
+
+```{r}
+# Function to convert image to array
+image_prep <- function(x) {
+arrays <- lapply(x, function(path) {
+img <- image_load(path, target_size = target_size,
+grayscale = F # Set FALSE if image is RGB
+)
+
+x <- image_to_array(img)
+
+x <- array_reshape(x, c(1, dim(x)))
+})
+
+do.call(abind::abind, c(arrays, list(along = 1)))
+}
+```
+
+
+```{r}
+test_x <- image_prep(val_data$file_name)
+# Check dimension of testing data set
+dim(test_x)
+```
+
+```{r}
+pred_test <- model %>% predict(test_x) %>% k_argmax()
+head(pred_test, 10)
+# Convert encoding to label
+decode <- function(x){
+case_when(x == 0 ~ "AK",
+x == 1 ~ "BCC",
+x == 2 ~ "BKL",
+x == 3 ~ "DF",
+x == 4 ~ "MEL",
+x == 5 ~ "NV",
+x == 6 ~ "SCC",
+x == 7 ~ "VASC",
+)
+}
+pred_test <- sapply(pred_test, decode)
+head(pred_test, 10)
+```
+
+```{r}
+confusionMatrix(as.factor(pred_test),as.factor(val_data$class))
+```
+
+
+```{r}
+model_big <- keras_model_sequential() %>%
+  # First convolutional layer
+  layer_conv_2d(filters = 32, kernel_size = c(5,5), # 5 x 5 filters
+  padding = "same",
+  activation = "relu",
+  input_shape = c(target_size, 3)
+  ) %>%
+  # Second convolutional layer
+  layer_conv_2d(filters = 32,
+  kernel_size = c(3,3), # 3 x 3 filters
+  padding = "same",
+  activation = "relu"
+  ) %>%
+  # Max pooling layer
+  layer_max_pooling_2d(pool_size = c(2,2)) %>%
+  # Third convolutional layer
+  layer_conv_2d(filters = 64,
+  kernel_size = c(3,3),
+  padding = "same",
+  activation = "relu"
+  ) %>%
+  # Max pooling layer
+  layer_max_pooling_2d(pool_size = c(2,2)) %>%
+  # Fourth convolutional layer
+  layer_conv_2d(filters = 128,
+  kernel_size = c(3,3),
+  padding = "same",
+  activation = "relu"
+  ) %>%
+  # Max pooling layer
+  layer_max_pooling_2d(pool_size = c(2,2)) %>%
+  # Fifth convolutional layer
+  layer_conv_2d(filters = 256,
+  kernel_size = c(3,3),
+  padding = "same",
+  activation = "relu"
+  ) %>%
+  # Max pooling layer
+  layer_max_pooling_2d(pool_size = c(2,2)) %>%
+  # Flattening layer
+  layer_flatten() %>%
+  # Dense layer
+  layer_dense(units = 64, activation = "relu") %>%
+  # Output layer
+  layer_dense(name = "Output", units = output_n, activation = "softmax")
+
+
+model_big
+```
+
+
+```{r}
+model_big %>%
+  compile(
+  loss = "categorical_crossentropy",
+  optimizer = optimizer_adam(lr = 0.001),
+  metrics = "accuracy"
+  )
+
+history <- model %>%
+    fit_generator(
+  # training data
+  train_image_array_gen,
+  # epochs
+  steps_per_epoch = as.integer(train_samples / batch_size),
+  epochs = 50,
+  # validation data
+  validation_data = val_image_array_gen,
+  validation_steps = as.integer(valid_samples / batch_size),
+  # print progress but don't create graphic
+  verbose = 1,
+  view_metrics = 0
+  )
+
+plot(history)
+```
+
+
+```{r}
+pred_test <- predict_classes(model_big, test_x)
+head(pred_test, 10)
+# Convert encoding to label
+decode <- function(x){
+case_when(x == 0 ~ "AK",
+x == 1 ~ "BCC",
+x == 2 ~ "BKL",
+x == 3 ~ "DF",
+x == 4 ~ "MEL",
+x == 5 ~ "NV",
+x == 6 ~ "SCC",
+x == 7 ~ "VASC",
+)
+}
+
+pred_test <- sapply(pred_test, decode)
+head(pred_test, 10)
+```
+
+
+```{r}
+confusionMatrix(as.factor(pred_test), as.factor(val_data$class))
+```
+
+```{r}
+knitr::stitch('myscript.r')
+```
+
+
+
+
+
+
+
+
