@@ -1,6 +1,6 @@
 ---
 title: "Loading Images into R"
-author: "Padma Tanikella"
+author: "Aditya"
 date: "`r Sys.Date()`"
 output: pdf_document
 ---
