@@ -1,0 +1,200 @@
+---
+title: "Loading Images into R"
+author: "Padma Tanikella"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Load the required libraries
+library(EBImage)
+library(readxl)
+library(tidyverse)
+library(caret)
+library(nnet)
+library (randomForest)
+library(e1071)
+library(gbm)
+```
+
+```{r}
+# set working directory: Set this as the directory where you have your .rmd file
+and the "Data" folder
+Wd_path="D:/Aditya/R"
+setwd(Wd_path)
+
+
+# Read the excel file as data frame. Make sure to save the file as .xlsx
+instead of the default .csv extension
+df = read_excel("Data/ISIC_2019_Training_GroundTruth.xlsx",col_names=TRUE)
+df = df[sample(nrow(df), 1000),]
+```
+
+
+```{r}
+Types=colnames(df)[2:9] # The types of skin Lesion (8 types),
+#Unknows is not considered as none of the labels corresponds to unknown
+
+w=64 # Width of the image
+h=64 # Height of the image
+N_features=w*h*3
+
+features <- data.frame(matrix(0, nrow=dim(df)[1], ncol=(N_features+1)))
+row.names(features) <- df$image
+colnames(features)[N_features+1] <- "type"
+
+# Empty column vector to store the unrolled pixel intensity data
+f = matrix(0, nrow = 1, ncol=N_features) 
+
+# Read the images based on type of Lesion, resize and assign to the corresponding column in the data frame
+for (i in 1:length(Types)) {
+  t=Types[i] # Type of the Leasion
+  lst=df$image[df[t]==1] # Indexes of all images belonging to that leasion type
+  # Read all images of a particular type
+  for (j in 1:length(lst)){
+    Name_I=lst[j] # Name of the image
+    pth=paste("Data/",t,"/",Name_I,".jpg",sep="")
+    #Path where image belong based on the name and type
+    I = readImage(pth) # Reading the image
+    I_resized = resize(I,w,h) # Resize into w*h
+    f=t(as.vector(I_resized)) # Unroll the image.
+    #This unrolls column wise, picks 2nd column of red, places it below 1st, repets for R,G, and B
+    features[Name_I,1:N_features]=f[1,1:N_features]
+    features[Name_I,"type"]=t
+  }
+}
+
+
+features$type <- as.factor(features$type)
+save(features,file =paste(Wd_path,"/features.Rdata",sep=""))
+
+```
+
+```{r}
+load(file =paste(Wd_path,"/features.Rdata",sep=""))
+```
+
+```{r}
+set.seed(1)
+#training.samples <- df_subset$image %>% createDataPartition(p = 0.75, list = FALSE)
+# Now Selecting 75% of data as sample from total 'n' rows of the data
+sample <- sample.int(n = nrow(features), size = floor(.75*nrow(features)), replace = F)
+train <- features[sample, ]
+test <- features[-sample, ]
+```
+
+
+```{r}
+# Logistic Regression
+start_time <- Sys.time()
+logistic <- nnet::multinom(type ~., data = train)
+
+# Summarize the model
+summary(logistic)
+
+# Make predictions
+predicted.classes <- logistic %>% predict(test)
+end_time <- Sys.time()
+logistic_time=end_time - start_time
+head(predicted.classes)
+# Model accuracy
+mean(predicted.classes == test$type)
+```
+
+
+```{r}
+# RandomForest
+start_time <- Sys.time()
+RF=randomForest(as.factor(train$type)~., data = train)
+# Summarize the model
+summary(RF)
+# Make predictions
+predicted.RF.train <- RF %>% predict(train)
+predicted.RF.test <- RF %>% predict(test)
+end_time <- Sys.time()
+RF_time=end_time - start_time
+end_time - start_time
+head(predicted.RF.test)
+# Model accuracy
+mean(predicted.RF.train == train$type)
+mean(predicted.RF.test == test$type)
+```
+
+```{r}
+confusionMatrix(as.factor(test$type),predicted.RF.test)
+```
+
+```{r}
+#Support Vector Machine
+start_time <- Sys.time()
+svm = svm(type~. , data = train, kernel = "radial", cost = 300, scale = FALSE)
+# Summarize the model
+summary(svm)
+# Make predictions
+predicted.svm.train <- svm %>% predict(train)
+predicted.svm.test <- svm %>% predict(test)
+end_time <- Sys.time()
+svm_time=end_time - start_time
+end_time - start_time
+head(predicted.svm.test)
+# Model accuracy
+mean(predicted.svm.train == train$type)
+mean(predicted.svm.test == test$type)
+```
+```{r}
+confusionMatrix(as.factor(test$type),
+predicted.svm.test
+)
+```
+
+
+```{r}
+#Boosting
+gbm_train = train
+gbm_test = test
+gbm_train$type=as.numeric(gbm_train$type)
+gbm_test$type=as.numeric(gbm_test$type)
+start_time <- Sys.time()
+GBM = gbm(type~. , data = gbm_train ,distribution = "gaussian", n.trees = 500,
+shrinkage = 0.01, interaction.depth = 4)
+
+# Summarize the model
+summary(GBM)
+# Make predictions
+predicted.gbm.train <- GBM %>% predict(gbm_train)
+predicted.gbm.test <- GBM %>% predict(gbm_test)
+end_time <- Sys.time()
+boosting_time=end_time - start_time
+end_time - start_time
+head(predicted.gbm.train)
+
+# Model accuracy
+mean(round(predicted.gbm.train,digits = 0) == gbm_train$type)
+mean(round(predicted.gbm.test,digits = 0) == gbm_test$type)
+```
+
+
+```{r}
+decode <- function(x){
+case_when(x == 1 ~ "AK",
+x == 2 ~ "BCC",
+x == 3 ~ "BKL",
+x == 4 ~ "DF",
+x == 5 ~ "MEL",
+x == 6 ~ "NV",
+x == 7 ~ "SCC",
+x == 8 ~ "VASC",
+)
+}
+confusionMatrix(as.factor(sapply(gbm_test$type, decode)),
+as.factor(sapply(round(predicted.gbm.test,digits = 0), decode)) )
+```
+
+
+
+
+
